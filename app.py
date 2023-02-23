@@ -1,50 +1,72 @@
-from flask import Flask, request
-from telegram.ext import Dispatcher, MessageHandler, Filters
-from telegram import Update
+import os
+import subprocess
 import requests
-from moviepy.video.VideoClip import VideoClip
-from moviepy.video.tools.subtitles import SubtitlesClip
+from flask import Flask, request
 
-# Create a new Flask application
 app = Flask(__name__)
 
-# Set up the Telegram bot
-dispatcher = Dispatcher(None, None)
+# Set up your Telegram bot token
+TOKEN = os.environ.get('BOT_TOKEN')
 
-# Define a handler function for handling Telegram messages
-def handle_message(update: Update, context: Dispatcher):
-    # Get the chat ID and message text from the update object
-    chat_id = update.effective_chat.id
-    message_text = update.message.text
+# Define the endpoint for your bot
+@app.route('/bot', methods=['POST'])
+def bot():
+    try:
+        # Parse the incoming message
+        print('Incoming message:', request.json)
+        chat_id = request.json['message']['chat']['id']
+        video_url = request.json['message']['video']['file_id']
+        subtitle_url = request.json['message']['document']['file_id']
+        
+        # Download the video and subtitle files
+        print('Downloading video:', video_url)
+        video_file = download_file(video_url)
+        print('Downloading subtitle:', subtitle_url)
+        subtitle_file = download_file(subtitle_url)
 
-    # Download the video file and subtitle file from the URLs in the message text
-    video_url, subtitle_url = message_text.split()
-    video_file = requests.get(video_url).content
-    subtitle_file = requests.get(subtitle_url).text
+        # Mux the subtitle into the video using FFmpeg
+        print('Muxing video and subtitle')
+        muxed_video_file = mux_subtitles(video_file, subtitle_file)
 
-    # Mux the subtitles into the video file
-    video_clip = VideoClip(video_file)
-    subtitle_clip = SubtitlesClip(subtitle_file)
-    subtitle_clip = subtitle_clip.set_start(0).set_end(video_clip.duration)
-    result_clip = video_clip.set_audio(None).set_subclip(0, video_clip.duration).set_fps(30).set_audio(video_clip.audio).set_subtitles([subtitle_clip])
-    result_file = "result.mp4"
-    result_clip.write_videofile(result_file, codec="libx264", temp_audiofile="temp-audio.m4a", remove_temp=True, audio_codec="aac")
+        # Upload the muxed video to Telegram
+        print('Uploading video')
+        upload_file(muxed_video_file, chat_id)
 
-    # Send the result file to the user
-    with open(result_file, "rb") as f:
-        context.bot.send_video(chat_id=chat_id, video=f)
+        return 'OK'
+    
+    except Exception as e:
+        print('Error:', e)
+        return 'Error'
 
-# Set up the Telegram message handler
-dispatcher.add_handler(MessageHandler(Filters.text, handle_message))
+# Download a file from Telegram using its file_id
+def download_file(file_id):
+    url = f'https://api.telegram.org/bot{TOKEN}/getFile'
+    params = {'file_id': file_id}
+    response = requests.get(url, params=params)
+    file_path = response.json()['result']['file_path']
+    file_url = f'https://api.telegram.org/file/bot{TOKEN}/{file_path}'
+    file_name = os.path.basename(file_path)
+    response = requests.get(file_url)
+    with open(file_name, 'wb') as f:
+        f.write(response.content)
+    print('File downloaded:', file_name)
+    return file_name
 
-# Define a route for handling incoming webhook requests from Telegram
-@app.route("/<token>", methods=["POST"])
-def webhook(token):
-    # Process the incoming update
-    update = Update.de_json(request.get_json(force=True), dispatcher.bot)
-    dispatcher.process_update(update)
-    return "ok"
+# Mux a subtitle file into a video file using FFmpeg
+def mux_subtitles(video_file, subtitle_file):
+    muxed_video_file = 'muxed_video.mp4'
+    subprocess.run(['ffmpeg', '-i', video_file, '-vf', f'subtitles={subtitle_file}', muxed_video_file])
+    print('Video and subtitle muxed')
+    return muxed_video_file
 
-if __name__ == "__main__":
-    # Start the Flask application
+# Upload a file to Telegram using its file_path and chat_id
+def upload_file(file_path, chat_id):
+    url = f'https://api.telegram.org/bot{TOKEN}/sendVideo'
+    files = {'video': open(file_path, 'rb')}
+    params = {'chat_id': chat_id}
+    response = requests.post(url, params=params, files=files)
+    print('Video uploaded')
+    return response.json()
+
+if __name__ == '__main__':
     app.run()
